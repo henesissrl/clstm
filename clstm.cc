@@ -363,6 +363,16 @@ struct Full : NetworkBase {
             NONLIN::f(outputs[t]);
         }
     }
+    void forward_step(const SequenceElem & input, const bool reset) {
+        if (reset) {
+            outputs.clear();
+            inputs.clear();
+        }
+        inputs.emplace_back(input);
+        outputs.emplace_back(MATMUL(W, input));
+        ADDCOLS(outputs.back(), w);
+        NONLIN::f(outputs.back());
+    }
     void backward() {
         d_inputs.resize(d_outputs.size());
         for (int t = d_outputs.size()-1; t >= 0; t--) {
@@ -511,6 +521,20 @@ struct SoftmaxLayer : NetworkBase {
             }
         }
     }
+    void forward_step(const SequenceElem & input, const bool reset) {
+        if (reset) {
+            outputs.clear();
+            inputs.clear();
+        }
+        inputs.emplace_back(input);
+        int no = ROWS(W), bs = COLS(input);
+        outputs.emplace_back(no, bs);
+        for (int b = 0; b < COLS(outputs.back()); b++) {
+            COL(outputs.back(), b) = MAPFUN(DOT(W, COL(input, b)) + w, limexp);
+            Float total = fmax(SUMREDUCE(COL(outputs.back(), b)), 1e-9);
+            COL(outputs.back(), b) /= total;
+        }
+    }
     void backward() {
         d_inputs.resize(d_outputs.size());
         for (int t = d_outputs.size()-1; t >= 0; t--) {
@@ -568,6 +592,22 @@ struct Stacked : NetworkBase {
         outputs = sub[sub.size()-1]->outputs;
         assert(outputs.size() == inputs.size());
     }
+    void forward_step(const SequenceElem & input, const bool reset) {
+        if (reset)
+        {
+            inputs.clear();
+            outputs.clear();
+        }
+        inputs.emplace_back(input);
+        assert(sub.size() > 0);
+        sub[0]->forward_step(input,reset);
+        for (int n = 1; n < sub.size(); n++) {
+            sub[n]->forward_step(sub[n-1]->outputs.back(),reset);
+        }
+        outputs.emplace_back(sub[sub.size()-1]->outputs.back());
+        assert(outputs.size() == inputs.size());
+
+    }
     void backward() {
         assert(outputs.size() > 0);
         assert(outputs.size() == inputs.size());
@@ -613,6 +653,9 @@ struct Reversed : NetworkBase {
         revcopy(net->inputs, inputs);
         net->forward();
         revcopy(outputs, net->outputs);
+    }
+    void forward_step(const SequenceElem & input, const bool reset) {
+        THROW("You can't use the iterative forward pass along with a Reversed layer");
     }
     void backward() {
         assert(sub.size() == 1);
@@ -663,6 +706,37 @@ struct Parallel : NetworkBase {
             outputs[t].resize(n1+n2, bs);
             BLOCK(outputs[t], 0, 0, n1, bs) = net1->outputs[t];
             BLOCK(outputs[t], n1, 0, n2, bs) = net2->outputs[t];
+        }
+    }
+    void forward_step(const SequenceElem & input, const bool reset) {
+        if (reset)
+        {
+            inputs.clear();
+            outputs.clear();
+        }
+        inputs.emplace_back(input);
+        const int subSize = sub.size();
+        assert(subSize > 0);
+
+        INetwork *net = sub[0].get();
+        net->forward_step(input,reset);
+        int outsize = ROWS(net->outputs[0]);
+        int bs = COLS(net->outputs[0]);
+
+        for ( int i = 1; i < subSize; ++i)
+            net = sub[i].get();
+            net->forward_step(input,reset);
+            assert(net->outputs.size() == N);
+            assert(bs == COLS(net->outputs[0]));
+            outsize += ROWS(net->outputs[0]);
+
+        outputs.emplace_back(outsize,bs);
+
+        for ( int i = 0, no_prev = 0, no_curr = 0; i < subSize; ++i, no_prev = no_curr) {
+            net = sub[i].get();
+            no_curr = ROWS(net->outputs[0]);
+            assert(bs == COLS(net->outputs[0]));
+            BLOCK(outputs.back(), no_prev, 0, no_curr, bs) = net->outputs.back();
         }
     }
     void backward() {
@@ -816,6 +890,36 @@ struct GenericNPLSTM : NetworkBase {
             if (t > 0) state[t] += EMUL(gf[t], state[t-1]);
             outputs[t] = nonlin<H>(state[t]).A * go[t].A;
         }
+    }
+    void forward_step(const SequenceElem & input, const bool reset) {
+        if (reset){
+            each([](Sequence &s) { s.clear(); }, source, sourceerr, outputs, inputs, SEQUENCES, DSEQUENCES);
+        }
+        each([](Sequence &s) { s.emplace_back(); s.back().setConstant(NAN);}, sourceerr, DSEQUENCES);
+
+        inputs.emplace_back(input);
+
+        int bs = COLS(input);
+        source.emplace_back(nf, bs);
+        SequenceElem & curr_source = source.back();
+        BLOCK(curr_source, 0, 0, 1, bs).setConstant(1);
+        BLOCK(curr_source, 1, 0, ni, bs) = input;
+        if (inputs.size() == 1)
+            BLOCK(curr_source, 1+ni, 0, no, bs).setConstant(0);
+        else{
+            //Note: at this point outputs.back() is still the previous output
+            BLOCK(curr_source, 1+ni, 0, no, bs) = outputs.back();
+        }
+
+        gi.emplace_back(nonlin<F>(MATMUL(WGI, curr_source)));
+        gf.emplace_back(nonlin<F>(MATMUL(WGF, curr_source)));
+        go.emplace_back(nonlin<F>(MATMUL(WGO, curr_source)));
+        ci.emplace_back(nonlin<G>(MATMUL(WCI, curr_source)));
+        state.emplace_back(ci.back().A * gi.back().A);
+        if (inputs.size() > 1)
+            state.back() += EMUL(gf.back(), state[state.size() - 2]);
+        outputs.emplace_back(nonlin<H>(state.back()).A * go.back().A);
+
     }
     void backward() {
         int N = inputs.size();
@@ -1119,6 +1223,7 @@ void ctc_train(INetwork *net, Sequence &xs, BatchClasses &targets) {
     THROW("unimplemented");
 }
 }  // namespace ocropus
+#define CLSTM_EXTRAS 1
 #ifdef CLSTM_EXTRAS
 // Extra layers; this uses internal function and class definitions from this
 // file, so it's included rather than linked. It's mostly a way of slowly deprecating

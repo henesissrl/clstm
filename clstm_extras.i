@@ -101,6 +101,68 @@ struct GenericLSTM : INetwork {
             outputs[t] = nonlin<H>(state[t]).A * go[t].A;
         }
     }
+    void forward_step(const SequenceElem & input, const bool reset) {
+        if (reset){
+            each([](Sequence &s) { s.clear(); }, source, sourceerr, outputs, inputs, SEQUENCES, DSEQUENCES);
+        }
+        each([](Sequence &s) { s.emplace_back();  s.back().setConstant(NAN);}, sourceerr, DSEQUENCES);
+
+
+        inputs.emplace_back(input);
+
+        int bs = COLS(input);
+        source.emplace_back(nf, bs);
+        SequenceElem & curr_source = source.back();
+        BLOCK(curr_source, 0, 0, 1, bs).setConstant(1);
+        BLOCK(curr_source, 1, 0, ni, bs) = input;
+        if (inputs.size() == 1)
+            BLOCK(curr_source, 1+ni, 0, no, bs).setConstant(0);
+        else
+            //Note: at this point outputs.back() is still the previous output
+            BLOCK(curr_source, 1+ni, 0, no, bs) = outputs.back();
+
+        if(PEEP){
+            gix.emplace_back(MATMUL(WGI, curr_source));
+            gfx.emplace_back(MATMUL(WGF, curr_source));
+            gox.emplace_back(MATMUL(WGO, curr_source));
+            //Note: at this point state.back() is still the previous output
+            if (inputs.size() > 1) {
+                int bs = COLS(state.back());
+                for (int b = 0; b < bs; b++) {
+                    if (PEEP) COL(gix.back(), b) += EMUL(WIP, COL(state.back(), b));
+                    if (PEEP) COL(gfx.back(), b) += EMUL(WFP, COL(state.back(), b));
+                }
+            }
+            gi.emplace_back(nonlin<F>(gix.back()));
+            gf.emplace_back(nonlin<F>(gfx.back()));
+        }
+        else {
+            gi.emplace_back(nonlin<F>(MATMUL(WGI, curr_source)));
+            gf.emplace_back(nonlin<F>(MATMUL(WGF, curr_source)));
+        }
+
+        ci.emplace_back(nonlin<G>(MATMUL(WCI, curr_source)));
+        state.emplace_back(ci.back().A * gi.back().A);
+        if(PEEP){
+            if (inputs.size() > 1){
+                state.back() += EMUL(gf.back(), state[state.size() - 2]);
+                int bs = COLS(state.back());
+                for (int b = 0; b < bs; b++)
+                    COL(gox.back(), b) += EMULV(WOP, COL(state.back(), b));
+            }
+            go.emplace_back(nonlin<F>(gox.back()));
+        }
+        else {
+            if (inputs.size() > 1){
+
+                state.back() += EMUL(gf.back(), state[state.size() - 2]);
+            }
+            go.emplace_back(nonlin<F>(MATMUL(WGO, curr_source)));
+        }
+
+        outputs.emplace_back(nonlin<H>(state.back()).A * go.back().A);
+
+    }
     void backward() {
         int N = inputs.size();
         d_inputs.resize(N);

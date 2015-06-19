@@ -119,7 +119,8 @@ inline void zeroinit(Vec &m, int no) {
     m.setZero();
 }
 
-typedef vector<Mat> Sequence;
+typedef Mat SequenceElem;
+typedef vector<SequenceElem> Sequence;
 
 inline void resize(Sequence &seq, int nsteps, int dims, int bs) {
     seq.resize(nsteps);
@@ -211,6 +212,7 @@ struct ITrainable {
     // Main methods for forward and backward propagation
     // of activations.
     virtual void forward() = 0;
+    virtual void forward_step(const SequenceElem & input, const bool reset) = 0;
     virtual void backward() = 0;
     virtual void update() = 0;
 

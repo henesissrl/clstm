@@ -103,7 +103,6 @@ struct Mat {
     }
 }
 
-
 struct Sequence {
     Sequence();
     ~Sequence();
@@ -150,6 +149,7 @@ struct ITrainable {
     void set(string key, double value);
     virtual void setLearningRate(Float lr, Float momentum) = 0;
     virtual void forward() = 0;
+    virtual void forward_step(const Mat & input, bool reset) = 0;
     virtual void backward() = 0;
     virtual void update() = 0;
     virtual int idepth();
@@ -363,12 +363,11 @@ void mat_of_array(Mat &a,PyObject *object_) {
     a.resize(N,d);
     for(int t=0;t<N;t++)
         for(int i=0;i<d;i++)
-            a(t,i) = np(d,i);
+            a(t,i) = np(t,i);
 }
 
 void array_of_mat(PyObject *object_,Mat &a) {
     npa_float np(object_);
-    if(np.rank()!=2) throw "rank must be 2";
     int N = a.rows();
     int d = a.cols();
     np.resize(N,d);
@@ -411,6 +410,18 @@ void array_of_sequence(PyObject *object_,Sequence &a) {
 
 %pythoncode %{
 import numpy
+
+def Mat_array(self):
+    a = numpy.zeros(1,'f')
+    array_of_mat(a, self)
+    return a
+Mat.array = Mat_array
+
+def Mat_aset(self, a):
+    mat_of_array(self, a)
+Mat.aset = Mat_aset
+
+SequenceElem = Mat
 
 def Sequence_array(self):
     a = numpy.zeros(1,'f')
