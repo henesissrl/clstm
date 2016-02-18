@@ -726,7 +726,7 @@ struct Parallel : NetworkBase {
         for ( int i = 1; i < subSize; ++i)
             net = sub[i].get();
             net->forward_step(input,reset);
-            assert(net->outputs.size() == N);
+            assert(net->outputs.size() == inputs.size());
             assert(bs == COLS(net->outputs[0]));
             outsize += ROWS(net->outputs[0]);
 
